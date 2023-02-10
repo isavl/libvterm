@@ -13,7 +13,8 @@ static size_t inplace_hex2bytes(char *s)
 
   while(*inpos) {
     unsigned int ch;
-    sscanf(inpos, "%2x", &ch);
+    if(sscanf(inpos, "%2x", &ch) < 1)
+      break;
     *outpos = ch;
     outpos += 1; inpos += 2;
   }
@@ -92,6 +93,12 @@ static void term_output(const char *s, size_t len, void *user)
     printf("%x%s", (unsigned char)s[i], i < len-1 ? "," : "\n");
 }
 
+static void printhex(const char *s, size_t len)
+{
+  while(len--)
+    printf("%02x", (uint8_t)(s++)[0]);
+}
+
 static int parser_text(const char bytes[], size_t len, void *user)
 {
   printf("text ");
@@ -126,8 +133,7 @@ static int parser_escape(const char bytes[], size_t len, void *user)
   }
 
   printf("escape ");
-  for(int i = 0; i < len; i++)
-    printf("%02x", bytes[i]);
+  printhex(bytes, len);
   printf("\n");
 
   return len;
@@ -163,21 +169,93 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
   return 1;
 }
 
-static int parser_osc(const char *command, size_t cmdlen, void *user)
+static int parser_osc(int command, VTermStringFragment frag, void *user)
 {
   printf("osc ");
-  for(int i = 0; i < cmdlen; i++)
-    printf("%02x", command[i]);
+
+  if(frag.initial) {
+    if(command == -1)
+      printf("[");
+    else
+      printf("[%d;", command);
+  }
+
+  printhex(frag.str, frag.len);
+
+  if(frag.final)
+    printf("]");
+
   printf("\n");
 
   return 1;
 }
 
-static int parser_dcs(const char *command, size_t cmdlen, void *user)
+static int parser_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
 {
   printf("dcs ");
-  for(int i = 0; i < cmdlen; i++)
-    printf("%02x", command[i]);
+
+  if(frag.initial) {
+    printf("[");
+    for(int i = 0; i < commandlen; i++)
+      printf("%02x", command[i]);
+  }
+
+  printhex(frag.str, frag.len);
+
+  if(frag.final)
+    printf("]");
+
+  printf("\n");
+
+  return 1;
+}
+
+static int parser_apc(VTermStringFragment frag, void *user)
+{
+  printf("apc ");
+
+  if(frag.initial)
+    printf("[");
+
+  printhex(frag.str, frag.len);
+
+  if(frag.final)
+    printf("]");
+
+  printf("\n");
+
+  return 1;
+}
+
+static int parser_pm(VTermStringFragment frag, void *user)
+{
+  printf("pm ");
+
+  if(frag.initial)
+    printf("[");
+
+  printhex(frag.str, frag.len);
+
+  if(frag.final)
+    printf("]");
+
+  printf("\n");
+
+  return 1;
+}
+
+static int parser_sos(VTermStringFragment frag, void *user)
+{
+  printf("sos ");
+
+  if(frag.initial)
+    printf("[");
+
+  printhex(frag.str, frag.len);
+
+  if(frag.final)
+    printf("]");
+
   printf("\n");
 
   return 1;
@@ -190,6 +268,19 @@ static VTermParserCallbacks parser_cbs = {
   .csi     = parser_csi,
   .osc     = parser_osc,
   .dcs     = parser_dcs,
+  .apc     = parser_apc,
+  .pm      = parser_pm,
+  .sos     = parser_sos,
+};
+
+static VTermStateFallbacks fallbacks = {
+  .control = parser_control,
+  .csi     = parser_csi,
+  .osc     = parser_osc,
+  .dcs     = parser_dcs,
+  .apc     = parser_apc,
+  .pm      = parser_pm,
+  .sos     = parser_sos,
 };
 
 /* These callbacks are shared by State and Screen */
@@ -247,7 +338,8 @@ static int settermprop(VTermProp prop, VTermValue *val, void *user)
     printf("settermprop %d %d\n", prop, val->number);
     return 1;
   case VTERM_VALUETYPE_STRING:
-    printf("settermprop %d \"%s\"\n", prop, val->string);
+    printf("settermprop %d %s\"%.*s\"%s\n", prop,
+        val->string.initial ? "[" : "", val->string.len, val->string.str, val->string.final ? "]" : "");
     return 1;
   case VTERM_VALUETYPE_COLOR:
     printf("settermprop %d ", prop);
@@ -304,6 +396,7 @@ static struct {
   int italic;
   int blink;
   int reverse;
+  int conceal;
   int strike;
   int font;
   VTermColor foreground;
@@ -326,6 +419,9 @@ static int state_setpenattr(VTermAttr attr, VTermValue *val, void *user)
     break;
   case VTERM_ATTR_REVERSE:
     state_pen.reverse = val->boolean;
+    break;
+  case VTERM_ATTR_CONCEAL:
+    state_pen.conceal = val->boolean;
     break;
   case VTERM_ATTR_STRIKE:
     state_pen.strike = val->boolean;
@@ -361,6 +457,31 @@ VTermStateCallbacks state_cbs = {
   .setpenattr  = state_setpenattr,
   .settermprop = settermprop,
   .setlineinfo = state_setlineinfo,
+};
+
+static int selection_set(VTermSelectionMask mask, VTermStringFragment frag, void *user)
+{
+  printf("selection-set mask=%04X ", mask);
+  if(frag.initial)
+    printf("[");
+  printhex(frag.str, frag.len);
+  if(frag.final)
+    printf("]");
+  printf("\n");
+
+  return 1;
+}
+
+static int selection_query(VTermSelectionMask mask, void *user)
+{
+  printf("selection-query mask=%04X\n", mask);
+
+  return 1;
+}
+
+VTermSelectionCallbacks selection_cbs = {
+  .set   = selection_set,
+  .query = selection_query,
 };
 
 static int want_screen_damage = 0;
@@ -485,6 +606,7 @@ int main(int argc, char **argv)
       if(!state) {
         state = vterm_obtain_state(vt);
         vterm_state_set_callbacks(state, &state_cbs, NULL);
+        vterm_state_set_selection_callbacks(state, &selection_cbs, NULL, NULL, 1024);
         vterm_state_set_bold_highbright(state, 1);
         vterm_state_reset(state, 1);
       }
@@ -517,7 +639,7 @@ int main(int argc, char **argv)
           want_settermprop = sense;
           break;
         case 'f':
-          vterm_state_set_unrecognised_fallbacks(state, sense ? &parser_cbs : NULL, NULL);
+          vterm_state_set_unrecognised_fallbacks(state, sense ? &fallbacks : NULL, NULL);
           break;
         default:
           fprintf(stderr, "Unrecognised WANTSTATE flag '%c'\n", line[i]);
@@ -527,7 +649,6 @@ int main(int argc, char **argv)
     else if(strstartswith(line, "WANTSCREEN") && (line[10] == '\0' || line[10] == ' ')) {
       if(!screen)
         screen = vterm_obtain_screen(vt);
-      vterm_screen_enable_altscreen(screen, 1);
       vterm_screen_set_callbacks(screen, &screen_cbs, NULL);
 
       int i = 10;
@@ -538,6 +659,9 @@ int main(int argc, char **argv)
         switch(line[i]) {
         case '-':
           sense = 0;
+          break;
+        case 'a':
+          vterm_screen_enable_altscreen(screen, 1);
           break;
         case 'd':
           want_screen_damage = sense;
@@ -693,6 +817,32 @@ int main(int argc, char **argv)
       vterm_mouse_button(vt, button, (press == 'd' || press == 'D'), mod);
     }
 
+    else if(strstartswith(line, "SELECTION ")) {
+      char *linep = line + 10;
+      unsigned int mask;
+      int len;
+      VTermStringFragment frag = { 0 };
+      sscanf(linep, "%x%n", &mask, &len);
+      linep += len;
+      while(linep[0] == ' ')
+        linep++;
+      if(linep[0] == '[') {
+        frag.initial = true;
+        linep++;
+        while(linep[0] == ' ')
+          linep++;
+      }
+      frag.len = inplace_hex2bytes(linep);
+      frag.str = linep;
+      linep += frag.len * 2;
+      while(linep[0] == ' ')
+        linep++;
+      if(linep[0] == ']') {
+        frag.final = true;
+      }
+      vterm_state_send_selection(state, mask, frag);
+    }
+
     else if(strstartswith(line, "DAMAGEMERGE ")) {
       char *linep = line + 12;
       while(linep[0] == ' ')
@@ -790,6 +940,25 @@ int main(int argc, char **argv)
         }
         else
           printf("?\n");
+      }
+      else if(strstartswith(line, "?lineinfo ")) {
+        char *linep = line + 10;
+        int row;
+        const VTermLineInfo *info;
+        while(linep[0] == ' ')
+          linep++;
+        if(sscanf(linep, "%d", &row) < 1) {
+          printf("! lineinfo unrecognised input\n");
+          goto abort_line;
+        }
+        info = vterm_state_get_lineinfo(state, row);
+        if(info->doublewidth)
+          printf("dwl ");
+        if(info->doubleheight)
+          printf("dhl ");
+        if(info->continuation)
+          printf("cont ");
+        printf("\n");
       }
       else if(strstartswith(line, "?screen_chars ")) {
         char *linep = line + 13;
