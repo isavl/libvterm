@@ -1,0 +1,45 @@
+Source: libvterm
+Maintainer: Igor Savlook <isav@alzari.pw>
+Section: libs
+Priority: optional
+Build-Depends:
+    debhelper (>= 13.1~),
+    debhelper-compat (= 13),
+    dpkg-dev (>= 1.16.1~),
+    libtool-bin,
+Standards-Version: 4.6.1
+Rules-Requires-Root: no
+
+Package: libvterm0
+Architecture: any
+Multi-Arch: same
+Pre-Depends:
+    ${misc:Pre-Depends},
+Depends:
+    ${misc:Depends},
+    ${shlibs:Depends},
+Description: Abstract terminal library
+ An abstract C99 library which implements a VT220 or xterm-like terminal
+ emulator. It doesn't use any particular graphics toolkit or output
+ system, instead it invokes callback function pointers that its embedding
+ program should provide it to draw on its behalf. It avoids calling
+ malloc() during normal running state, allowing it to be used in embedded
+ kernel situations.
+
+Package: libvterm-bin
+Architecture: any
+Depends:
+    ${misc:Depends},
+    ${shlibs:Depends},
+Description: libvterm utility programs
+ This package contains utility programs that demonstrate libvterm.
+
+Package: libvterm-dev
+Architecture: any
+Multi-Arch: same
+Depends:
+    ${misc:Depends},
+    libvterm0 (= ${binary:Version}),
+Description: libvterm development files
+ This package contains the header files and libraries needed for developing
+ with libvterm.
