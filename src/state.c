@@ -275,8 +275,9 @@ static int on_text(const char bytes[], size_t len, void *user)
 
   VTermPos oldpos = state->pos;
 
-  // We'll have at most len codepoints
-  uint32_t codepoints[len];
+  uint32_t *codepoints = (uint32_t *)(state->vt->tmpbuffer);
+  size_t maxpoints = (state->vt->tmpbuffer_len) / sizeof(uint32_t);
+
   int npoints = 0;
   size_t eaten = 0;
 
@@ -287,7 +288,7 @@ static int on_text(const char bytes[], size_t len, void *user)
                              &state->encoding[state->gr_set];
 
   (*encoding->enc->decode)(encoding->enc, encoding->data,
-      codepoints, &npoints, state->gsingle_set ? 1 : len,
+      codepoints, &npoints, state->gsingle_set ? 1 : maxpoints,
       bytes, &eaten, len);
 
   /* There's a chance an encoding (e.g. UTF-8) hasn't found enough bytes yet
@@ -347,13 +348,15 @@ static int on_text(const char bytes[], size_t len, void *user)
     // Try to find combining characters following this
     int glyph_starts = i;
     int glyph_ends;
-    for(glyph_ends = i + 1; glyph_ends < npoints; glyph_ends++)
+    for(glyph_ends = i + 1;
+        (glyph_ends < npoints) && (glyph_ends < glyph_starts + VTERM_MAX_CHARS_PER_CELL);
+        glyph_ends++)
       if(!vterm_unicode_is_combining(codepoints[glyph_ends]))
         break;
 
     int width = 0;
 
-    uint32_t chars[glyph_ends - glyph_starts + 1];
+    uint32_t chars[VTERM_MAX_CHARS_PER_CELL + 1];
 
     for( ; i < glyph_ends; i++) {
       chars[i - glyph_starts] = codepoints[i];
@@ -366,6 +369,9 @@ static int on_text(const char bytes[], size_t len, void *user)
 #endif
       width += this_width;
     }
+
+    while(i < npoints && vterm_unicode_is_combining(codepoints[i]))
+      i++;
 
     chars[glyph_ends - glyph_starts] = 0;
     i--;
@@ -910,6 +916,12 @@ static void request_dec_mode(VTermState *state, int num)
   vterm_push_output_sprintf_ctrl(state->vt, C1_CSI, "?%d;%d$y", num, reply ? 1 : 2);
 }
 
+static void request_version_string(VTermState *state)
+{
+  vterm_push_output_sprintf_str(state->vt, C1_DCS, true, ">|libvterm(%d.%d)",
+      VTERM_VERSION_MAJOR, VTERM_VERSION_MINOR);
+}
+
 static int on_csi(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user)
 {
   VTermState *state = user;
@@ -1081,6 +1093,12 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
       for(int row = rect.start_row; row < rect.end_row; row++)
         set_lineinfo(state, row, FORCE, DWL_OFF, DHL_OFF);
       erase(state, rect, selective);
+      break;
+
+    case 3:
+      if(state->callbacks && state->callbacks->sb_clear)
+        if((*state->callbacks->sb_clear)(state->cbdata))
+          return 1;
       break;
     }
     break;
@@ -1323,6 +1341,29 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
     vterm_state_setpen(state, args, argcount);
     break;
 
+  case LEADER('?', 0x6d): // DECSGR
+    /* No actual DEC terminal recognised these, but some printers did. These
+     * are alternative ways to request subscript/superscript/off
+     */
+    for(int argi = 0; argi < argcount; argi++) {
+      long arg;
+      switch(arg = CSI_ARG(args[argi])) {
+        case 4: // Superscript on
+          arg = 73;
+          vterm_state_setpen(state, &arg, 1);
+          break;
+        case 5: // Subscript on
+          arg = 74;
+          vterm_state_setpen(state, &arg, 1);
+          break;
+        case 24: // Super+subscript off
+          arg = 75;
+          vterm_state_setpen(state, &arg, 1);
+          break;
+      }
+    }
+    break;
+
   case 0x6e: // DSR - ECMA-48 8.3.35
   case LEADER('?', 0x6e): // DECDSR
     val = CSI_ARG_OR(args[0], 0);
@@ -1351,6 +1392,10 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 
   case LEADER('?', INTERMED('$', 0x70)):
     request_dec_mode(state, CSI_ARG(args[0]));
+    break;
+
+  case LEADER('>', 0x71): // XTVERSION - xterm query version string
+    request_version_string(state);
     break;
 
   case INTERMED(' ', 0x71): // DECSCUSR - DEC set cursor shape
@@ -1817,7 +1862,7 @@ static void request_status_string(VTermState *state, VTermStringFragment frag)
       return;
   }
 
-  vterm_push_output_sprintf_str(state->vt, C1_DCS, true, "0$r%s", tmp);
+  vterm_push_output_sprintf_str(state->vt, C1_DCS, true, "0$r");
 }
 
 static int on_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
@@ -1902,32 +1947,6 @@ static int on_resize(int rows, int cols, void *user)
     state->tabstops = newtabstops;
   }
 
-  if(rows != state->rows) {
-    for(int bufidx = BUFIDX_PRIMARY; bufidx <= BUFIDX_ALTSCREEN; bufidx++) {
-      VTermLineInfo *oldlineinfo = state->lineinfos[bufidx];
-      if(!oldlineinfo)
-        continue;
-
-      VTermLineInfo *newlineinfo = vterm_allocator_malloc(state->vt, rows * sizeof(VTermLineInfo));
-
-      int row;
-      for(row = 0; row < state->rows && row < rows; row++) {
-        newlineinfo[row] = oldlineinfo[row];
-      }
-
-      for( ; row < rows; row++) {
-        newlineinfo[row] = (VTermLineInfo){
-          .doublewidth = 0,
-        };
-      }
-
-      vterm_allocator_free(state->vt, state->lineinfos[bufidx]);
-      state->lineinfos[bufidx] = newlineinfo;
-    }
-
-    state->lineinfo = state->lineinfos[state->mode.alt_screen ? BUFIDX_ALTSCREEN : BUFIDX_PRIMARY];
-  }
-
   state->rows = rows;
   state->cols = cols;
 
@@ -1937,13 +1956,44 @@ static int on_resize(int rows, int cols, void *user)
     UBOUND(state->scrollregion_right, state->cols);
 
   VTermStateFields fields = {
-    .pos = state->pos,
+    .pos       = state->pos,
+    .lineinfos = { [0] = state->lineinfos[0], [1] = state->lineinfos[1] },
   };
 
-  if(state->callbacks && state->callbacks->resize)
+  if(state->callbacks && state->callbacks->resize) {
     (*state->callbacks->resize)(rows, cols, &fields, state->cbdata);
+    state->pos = fields.pos;
 
-  state->pos = fields.pos;
+    state->lineinfos[0] = fields.lineinfos[0];
+    state->lineinfos[1] = fields.lineinfos[1];
+  }
+  else {
+    if(rows != state->rows) {
+      for(int bufidx = BUFIDX_PRIMARY; bufidx <= BUFIDX_ALTSCREEN; bufidx++) {
+        VTermLineInfo *oldlineinfo = state->lineinfos[bufidx];
+        if(!oldlineinfo)
+          continue;
+
+        VTermLineInfo *newlineinfo = vterm_allocator_malloc(state->vt, rows * sizeof(VTermLineInfo));
+
+        int row;
+        for(row = 0; row < state->rows && row < rows; row++) {
+          newlineinfo[row] = oldlineinfo[row];
+        }
+
+        for( ; row < rows; row++) {
+          newlineinfo[row] = (VTermLineInfo){
+            .doublewidth = 0,
+          };
+        }
+
+        vterm_allocator_free(state->vt, state->lineinfos[bufidx]);
+        state->lineinfos[bufidx] = newlineinfo;
+      }
+    }
+  }
+
+  state->lineinfo = state->lineinfos[state->mode.alt_screen ? BUFIDX_ALTSCREEN : BUFIDX_PRIMARY];
 
   if(state->at_phantom && state->pos.col < cols-1) {
     state->at_phantom = 0;

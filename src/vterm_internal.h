@@ -48,6 +48,8 @@ struct VTermPen
   unsigned int conceal:1;
   unsigned int strike:1;
   unsigned int font:4; /* To store 0-9 */
+  unsigned int small:1;
+  unsigned int baseline:2;
 };
 
 struct VTermState
@@ -172,7 +174,7 @@ struct VTermState
 
 struct VTerm
 {
-  VTermAllocatorFunctions *allocator;
+  const VTermAllocatorFunctions *allocator;
   void *allocdata;
 
   int rows;
@@ -225,6 +227,8 @@ struct VTerm
     void *cbdata;
 
     bool string_initial;
+
+    bool emit_nul;
   } parser;
 
   /* len == malloc()ed size; cur == number of valid bytes */

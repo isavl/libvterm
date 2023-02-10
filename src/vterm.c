@@ -29,33 +29,53 @@ static VTermAllocatorFunctions default_allocator = {
 
 VTerm *vterm_new(int rows, int cols)
 {
-  return vterm_new_with_allocator(rows, cols, &default_allocator, NULL);
+  return vterm_build(&(const struct VTermBuilder){
+      .rows = rows,
+      .cols = cols,
+    });
 }
 
 VTerm *vterm_new_with_allocator(int rows, int cols, VTermAllocatorFunctions *funcs, void *allocdata)
 {
+  return vterm_build(&(const struct VTermBuilder){
+      .rows = rows,
+      .cols = cols,
+      .allocator = funcs,
+      .allocdata = allocdata,
+    });
+}
+
+/* A handy macro for defaulting values out of builder fields */
+#define DEFAULT(v, def)  ((v) ? (v) : (def))
+
+VTerm *vterm_build(const struct VTermBuilder *builder)
+{
+  const VTermAllocatorFunctions *allocator = DEFAULT(builder->allocator, &default_allocator);
+
   /* Need to bootstrap using the allocator function directly */
-  VTerm *vt = (*funcs->malloc)(sizeof(VTerm), allocdata);
+  VTerm *vt = (*allocator->malloc)(sizeof(VTerm), builder->allocdata);
 
-  vt->allocator = funcs;
-  vt->allocdata = allocdata;
+  vt->allocator = allocator;
+  vt->allocdata = builder->allocdata;
 
-  vt->rows = rows;
-  vt->cols = cols;
+  vt->rows = builder->rows;
+  vt->cols = builder->cols;
 
   vt->parser.state = NORMAL;
 
   vt->parser.callbacks = NULL;
   vt->parser.cbdata    = NULL;
 
+  vt->parser.emit_nul  = false;
+
   vt->outfunc = NULL;
   vt->outdata = NULL;
 
-  vt->outbuffer_len = 64;
+  vt->outbuffer_len = DEFAULT(builder->outbuffer_len, 4096);
   vt->outbuffer_cur = 0;
   vt->outbuffer = vterm_allocator_malloc(vt, vt->outbuffer_len);
 
-  vt->tmpbuffer_len = 64;
+  vt->tmpbuffer_len = DEFAULT(builder->tmpbuffer_len, 4096);
   vt->tmpbuffer = vterm_allocator_malloc(vt, vt->tmpbuffer_len);
 
   return vt;
@@ -95,6 +115,9 @@ void vterm_get_size(const VTerm *vt, int *rowsp, int *colsp)
 
 void vterm_set_size(VTerm *vt, int rows, int cols)
 {
+  if(rows < 1 || cols < 1)
+    return;
+
   vt->rows = rows;
   vt->cols = cols;
 
@@ -253,6 +276,8 @@ VTermValueType vterm_get_attr_type(VTermAttr attr)
     case VTERM_ATTR_FONT:       return VTERM_VALUETYPE_INT;
     case VTERM_ATTR_FOREGROUND: return VTERM_VALUETYPE_COLOR;
     case VTERM_ATTR_BACKGROUND: return VTERM_VALUETYPE_COLOR;
+    case VTERM_ATTR_SMALL:      return VTERM_VALUETYPE_BOOL;
+    case VTERM_ATTR_BASELINE:   return VTERM_VALUETYPE_INT;
 
     case VTERM_N_ATTRS: return 0;
   }
